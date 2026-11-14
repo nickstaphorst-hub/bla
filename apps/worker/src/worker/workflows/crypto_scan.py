@@ -1,10 +1,11 @@
 """Crypto market scan: scans the top coins on market cap and produces a trade proposal.
 
 Runs unattended on a schedule (every 6 hours) as a managed deployment. It uses
-only free public market data: CoinGecko for the top-N ranking and price
-changes, Binance for OHLCV candles, and a Mistral model to turn the numbers
-into a structured, reasoned trade proposal. The workflow never places orders;
-its output is an advisory report only.
+only free public data: CoinGecko for the top-N ranking and price changes,
+Binance for OHLCV candles, alternative.me for the Fear & Greed Index and
+public RSS feeds (Cointelegraph, Decrypt, CoinDesk) for news headlines. A
+Mistral model turns prices, sentiment and news into a structured, reasoned
+trade proposal. The workflow never places orders; its output is advisory.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ class ScanInput(BaseModel):
     risk_profile: str = "balanced"
     report_language: str = "nl"
     max_trade_ideas: int = Field(default=3, ge=1, le=5)
+    news_max_items: int = Field(default=12, ge=5, le=25)
 
 
 class CoinSnapshot(BaseModel):
@@ -58,6 +60,29 @@ class CoinSnapshot(BaseModel):
     volatility_pct: float | None = None
     trend: str = "neutral"
     klines_source: str = "none"
+
+
+class FearGreed(BaseModel):
+    """Market-wide sentiment state from alternative.me."""
+
+    value: int = Field(ge=0, le=100)
+    classification: str
+    value_yesterday: int | None = None
+    value_last_week: int | None = None
+    change_1d: int | None = None
+    change_7d: int | None = None
+    history: list[int] = Field(default_factory=list)
+
+
+class NewsItem(BaseModel):
+    """One scored news headline from the public RSS feeds."""
+
+    title: str
+    source: str
+    published: str | None = None
+    url: str = ""
+    sentiment_score: int = Field(ge=-2, le=2)
+    sentiment: str
 
 
 class TradeIdea(BaseModel):
@@ -93,6 +118,9 @@ class ScanOutput(BaseModel):
     risk_profile: str
     model: str
     market_snapshot: list[CoinSnapshot]
+    fear_greed: FearGreed | None = None
+    news: list[NewsItem] = Field(default_factory=list)
+    news_sentiment: dict | None = None
     proposal: Proposal
     report_markdown: str
 
@@ -158,13 +186,64 @@ async def fetch_klines(symbols: list[str], interval: str, limit: int) -> dict[st
     return result
 
 
+@workflows.activity()
+async def fetch_fear_greed() -> dict | None:
+    """Fetch the crypto Fear & Greed Index (alternative.me, free public API).
+
+    Returns ``None`` when the service is unreachable: sentiment enriches the
+    analysis, but a scan without it is still valid, so failure is not fatal.
+    """
+    import httpx
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for attempt in range(3):
+            try:
+                resp = await client.get(
+                    "https://api.alternative.me/fng/", params={"limit": 8}
+                )
+            except httpx.HTTPError:
+                break
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code in _RETRYABLE_STATUS:
+                await asyncio.sleep(1.5 * (2**attempt))
+                continue
+            break
+    return None
+
+
+@workflows.activity()
+async def fetch_news_feeds() -> dict[str, str]:
+    """Fetch the raw RSS XML of each public crypto news feed.
+
+    Returns ``{source: xml_text}`` for the feeds that responded; an
+    unreachable feed is simply absent and contributes no headlines.
+    """
+    import httpx
+
+    feeds: dict[str, str] = {}
+    async with httpx.AsyncClient(
+        timeout=30.0, headers={"User-Agent": "crypto-market-agent/1.0 (+rss)"}
+    ) as client:
+        for source, url in crypto_analysis.NEWS_FEEDS.items():
+            try:
+                resp = await client.get(url)
+            except httpx.HTTPError:
+                continue  # skip this feed, the others may still work
+            if resp.status_code == 200 and resp.text:
+                feeds[source] = resp.text
+    return feeds
+
+
 @workflows.workflow.define(
     name="crypto-market-scan",
     workflow_display_name="Crypto Market Scan",
     workflow_description=(
-        "Scant de top crypto's op market cap (CoinGecko + Binance data) en "
-        "produceert met een Mistral-model een onderbouwd trade-voorstel met "
-        "entry, stop-loss en take-profits. Advies, geen orders."
+        "Scant de top crypto's op market cap (CoinGecko + Binance data), "
+        "verrijkt de analyse met markt-sentiment (Fear & Greed Index) en "
+        "cryptonieuws uit RSS-feeds, en produceert met een Mistral-model een "
+        "onderbouwd trade-voorstel met entry, stop-loss en take-profits. "
+        "Advies, geen orders."
     ),
 )
 class CryptoMarketScan:
@@ -193,8 +272,31 @@ class CryptoMarketScan:
             for coin, symbol in zip(coins, symbols, strict=False)
         ]
 
+        fear_greed_raw = await fetch_fear_greed()
+        fear_greed = (
+            crypto_analysis.parse_fear_greed(fear_greed_raw) if fear_greed_raw else None
+        )
+
+        feeds_xml = await fetch_news_feeds()
+        news = crypto_analysis.merge_news(
+            {
+                source: crypto_analysis.parse_rss_feed(xml_text, source)
+                for source, xml_text in feeds_xml.items()
+            },
+            max_items=input.news_max_items,
+        )
+        news_sentiment = crypto_analysis.summarize_news_sentiment(news)
+        coin_mentions = crypto_analysis.coin_mention_counts(news, rows)
+
         prompt = crypto_analysis.build_analysis_prompt(
-            rows, input.risk_profile, input.max_trade_ideas, input.report_language
+            rows,
+            input.risk_profile,
+            input.max_trade_ideas,
+            input.report_language,
+            fear_greed=fear_greed,
+            news=news,
+            news_sentiment=news_sentiment,
+            coin_mentions=coin_mentions,
         )
         request = ChatCompletionRequest(
             model=input.model,
@@ -209,6 +311,10 @@ class CryptoMarketScan:
             rows=rows,
             proposal=proposal.model_dump(),
             model=input.model,
+            fear_greed=fear_greed,
+            news=news,
+            news_sentiment=news_sentiment,
+            coin_mentions=coin_mentions,
         )
 
         return ScanOutput(
@@ -217,6 +323,11 @@ class CryptoMarketScan:
             risk_profile=input.risk_profile,
             model=input.model,
             market_snapshot=[CoinSnapshot(**row) for row in rows],
+            fear_greed=(
+                FearGreed(**fear_greed) if fear_greed is not None else None
+            ),
+            news=[NewsItem(**item) for item in news],
+            news_sentiment=news_sentiment,
             proposal=proposal,
             report_markdown=report_markdown,
         )
