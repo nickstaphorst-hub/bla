@@ -24,6 +24,7 @@ from mistralai.workflows.plugins.mistralai import (
 from worker.workflows import crypto_analysis
 
 RISK_PROFILES = ("conservative", "balanced", "aggressive")
+TRADING_MODES = ("any", "spot")
 
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
@@ -40,6 +41,13 @@ class ScanInput(BaseModel):
     report_language: str = "nl"
     max_trade_ideas: int = Field(default=3, ge=1, le=5)
     news_max_items: int = Field(default=12, ge=5, le=25)
+    trading_mode: str = Field(
+        default="any",
+        description=(
+            "'any' = long/short zoals de data dicteert; 'spot' = alleen koop-"
+            "ideeen (buy zone, invalidatie, verkoopdoelen), shorts niet uitvoerbaar"
+        ),
+    )
 
 
 class CoinSnapshot(BaseModel):
@@ -116,6 +124,7 @@ class ScanOutput(BaseModel):
     as_of: str
     quote_currency: str
     risk_profile: str
+    trading_mode: str = "any"
     model: str
     market_snapshot: list[CoinSnapshot]
     fear_greed: FearGreed | None = None
@@ -243,7 +252,9 @@ async def fetch_news_feeds() -> dict[str, str]:
         "verrijkt de analyse met markt-sentiment (Fear & Greed Index) en "
         "cryptonieuws uit RSS-feeds, en produceert met een Mistral-model een "
         "onderbouwd trade-voorstel met entry, stop-loss en take-profits. "
-        "Advies, geen orders."
+        "Ondersteunt een spot-modus (trading_mode='spot') voor handelaren die "
+        "alleen spot kunnen traden: dan alleen koop-ideeën met koopzone, "
+        "invalidatieniveau en verkoopdoelen. Advies, geen orders."
     ),
 )
 class CryptoMarketScan:
@@ -252,6 +263,10 @@ class CryptoMarketScan:
         if input.risk_profile not in RISK_PROFILES:
             raise ValueError(
                 f"risk_profile moet een van {RISK_PROFILES} zijn, got: {input.risk_profile}"
+            )
+        if input.trading_mode not in TRADING_MODES:
+            raise ValueError(
+                f"trading_mode moet een van {TRADING_MODES} zijn, got: {input.trading_mode}"
             )
 
         markets = await fetch_top_markets(input.top_n, input.quote_currency)
@@ -297,6 +312,7 @@ class CryptoMarketScan:
             news=news,
             news_sentiment=news_sentiment,
             coin_mentions=coin_mentions,
+            trading_mode=input.trading_mode,
         )
         request = ChatCompletionRequest(
             model=input.model,
@@ -315,12 +331,14 @@ class CryptoMarketScan:
             news=news,
             news_sentiment=news_sentiment,
             coin_mentions=coin_mentions,
+            trading_mode=input.trading_mode,
         )
 
         return ScanOutput(
             as_of=as_of,
             quote_currency=input.quote_currency,
             risk_profile=input.risk_profile,
+            trading_mode=input.trading_mode,
             model=input.model,
             market_snapshot=[CoinSnapshot(**row) for row in rows],
             fear_greed=(

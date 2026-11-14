@@ -482,8 +482,30 @@ def build_analysis_prompt(
     news: list[dict[str, Any]] | None = None,
     news_sentiment: dict[str, Any] | None = None,
     coin_mentions: list[dict[str, Any]] | None = None,
+    trading_mode: str = "any",
 ) -> str:
-    """Prompt for the proposal model: data + sentiment + news + instructions."""
+    """Prompt for the proposal model: data + sentiment + news + instructions.
+
+    ``trading_mode="spot"`` restricts the proposal to what a spot-only trader
+    can execute: buy (long) ideas with buy zone, invalidation and sell
+    targets, no shorts, no leverage.
+    """
+    spot_rules = ""
+    if trading_mode == "spot":
+        spot_rules = (
+            "8. HANDELSMODUS: SPOT-ONLY. De handelaar kan uitsluitend kopen en "
+            "verkopen op de spotmarkt (geen hefboom, geen shorts, geen "
+            "derivaten):\n"
+            "   - Sta ALLEEN direction 'long' of 'none' toe. Short-ideeën zijn "
+            "niet uitvoerbaar: benoem ze hooguit als context, geef ze nooit als "
+            "trade-idee.\n"
+            "   - Presenteer de entry-zone als KOOPZONE (limietorders of DCA), "
+            "de stop-loss als INVALIDATIENIVEAU (verkooppunt als de prijs er "
+            "duidelijk onder zakt) en de take-profits als VERKOOPDOELEN.\n"
+            "   - Position sizing als fractie van het spotportfolio, zonder "
+            "hefboom; er is geen liquidatierisico, maar een daling kost de "
+            "volledige beweging.\n"
+        )
     news = news or []
     fg_block = (
         json.dumps(fear_greed, ensure_ascii=False)
@@ -535,6 +557,7 @@ def build_analysis_prompt(
         "7. Sentiment en nieuws zijn contextsignalen, geen zekerheden: weeg ze "
         "mee bij regime en onderbouwing, maar speculeer NIET over evenementen, "
         "kortingsacties of kennis die niet in de aangeleverde data staan.\n"
+        + spot_rules
     )
 
 def _fmt_price(value: float | int | None) -> str:
@@ -585,11 +608,17 @@ def render_report(
     news: list[dict[str, Any]] | None = None,
     news_sentiment: dict[str, Any] | None = None,
     coin_mentions: list[dict[str, Any]] | None = None,
+    trading_mode: str = "any",
 ) -> str:
-    """Render the final Markdown report from snapshot, proposal and sentiment."""
+    """Render the final Markdown report from snapshot, proposal and sentiment.
+
+    In ``trading_mode="spot"`` the field labels shift to spot terminology and
+    short ideas (which the prompt already forbids) render as not executable.
+    """
     regime = proposal.get("market_regime", "onbekend")
     news = news or []
     has_sentiment = fear_greed is not None or bool(news)
+    spot = trading_mode == "spot"
 
     data_sources = "CoinGecko + Binance"
     if fear_greed is not None:
@@ -597,11 +626,15 @@ def render_report(
     if news:
         data_sources += " + RSS-nieuws (Cointelegraph/Decrypt/CoinDesk)"
 
+    mode_line = f"Risicoprofiel: {risk_profile}"
+    if spot:
+        mode_line += " · Handelsmodus: spot (alleen koop, geen hefboom)"
+
     lines: list[str] = [
         "# Crypto Marktscan - Trade-voorstel",
         "",
         f"*Van: {as_of} ·Quote: {quote_currency.upper()} · "
-        f"Risicoprofiel: {risk_profile} · Model: {model} · "
+        f"{mode_line} · Model: {model} · "
         f"Data: {data_sources}*",
         "",
         "## Samenvatting",
@@ -675,21 +708,39 @@ def render_report(
     ideas = proposal.get("trade_ideas") or []
     if not ideas:
         lines.append("Geen voorstellen deze scan.")
+    if spot:
+        lines.extend(
+            [
+                "*Handelsmodus spot: alleen koopideeën (geen hefboom, geen shorts). "
+                "Koopzone = limietorders of DCA; invalidatie = verkooppunt als de "
+                "prijs eronder zakt; verkoopdoelen = deelverkopen bij de targets.*",
+                "",
+            ]
+        )
+    entry_label = "Koopzone" if spot else "Entry-zone"
+    stop_label = "Invalidatie (verkoop onder)" if spot else "Stop-loss"
+    tp_label = "Verkoopdoelen" if spot else "Take-profit"
     for idx, idea in enumerate(ideas, start=1):
         direction = str(idea.get("direction", "none")).upper()
         conviction = idea.get("conviction_pct", 0)
         lines.append(f"### {idx}. {idea.get('symbol', '?')} - {direction} "
                       f"(overtuiging {conviction}/100)")
         lines.append("")
-        if direction == "NONE":
-            lines.append(f"Geen setup: {idea.get('rationale', '')}")
+        if direction == "NONE" or (spot and direction == "SHORT"):
+            if spot and direction == "SHORT":
+                lines.append(
+                    f"Geen setup (short is op de spotmarkt niet uitvoerbaar): "
+                    f"{idea.get('rationale', '')}"
+                )
+            else:
+                lines.append(f"Geen setup: {idea.get('rationale', '')}")
         else:
-            lines.append(f"- **Entry-zone:** {_fmt_price(idea.get('entry_low'))} "
+            lines.append(f"- **{entry_label}:** {_fmt_price(idea.get('entry_low'))} "
                          f"- {_fmt_price(idea.get('entry_high'))}")
-            lines.append(f"- **Stop-loss:** {_fmt_price(idea.get('stop_loss'))}")
+            lines.append(f"- **{stop_label}:** {_fmt_price(idea.get('stop_loss'))}")
             tp1 = _fmt_price(idea.get("take_profit_1"))
             tp2 = _fmt_price(idea.get("take_profit_2"))
-            lines.append(f"- **Take-profit:** TP1 {tp1}"
+            lines.append(f"- **{tp_label}:** TP1 {tp1}"
                          + (f" · TP2 {tp2}" if idea.get("take_profit_2") is not None else ""))
             lines.append(f"- **Timeframe:** {idea.get('timeframe', '-')}")
             lines.append(f"- **Onderbouwing:** {idea.get('rationale', '-')}")
