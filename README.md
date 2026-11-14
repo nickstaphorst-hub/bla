@@ -29,7 +29,13 @@ Mistral-platform en produceert een rapport; hij plaatst nooit orders.
    take-profits, timeframe en onderbouwing, plus de belangrijkste risico's.
    Nieuws en sentiment zijn contextsignalen; het model speculeert niet over
    kennis die niet in de aangeleverde data staat.
-6. **Rapport** - De workflow rendert een Markdown-rapport (`report_markdown`)
+6. **Spot-modus** - Met input `trading_mode: "spot"` (default `"any"`) past de
+   scan zich aan handelaren aan die alleen spot kunnen traden (bijv. Bybit
+   EU): het model genereert uitsluitend koop-ideeën (of 'none') met een
+   koopzone (limietorders/DCA), een invalidatieniveau (verkooppunt als de
+   prijs eronder zakt) en verkoopdoelen; shorts zijn niet uitvoerbaar en
+   worden zo gemarkeerd. Position sizing zonder hefboom.
+7. **Rapport** - De workflow rendert een Markdown-rapport (`report_markdown`)
    met sentiment- en nieuwssecties plus de gestructureerde data als uitvoer
    van de execution.
 
@@ -40,7 +46,8 @@ Registratienaam: `crypto-market-scan`
 ```text
 Input (ScanInput):  top_n, quote_currency, klines_interval, klines_limit,
                     model, risk_profile (conservative|balanced|aggressive),
-                    report_language, max_trade_ideas, news_max_items
+                    report_language, max_trade_ideas, news_max_items,
+                    trading_mode (any|spot)
 Output (ScanOutput): as_of, market_snapshot[], fear_greed, news[],
                     news_sentiment, proposal, report_markdown
 ```
