@@ -12,12 +12,13 @@ ENV UV_PYTHON_PREFERENCE=only-system \
     UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
     UV_COMPILE_BYTECODE_TIMEOUT=900
-COPY pyproject.toml uv.lock ./
-COPY tools/uv.sh tools/
-RUN --mount=type=secret,id=registry_token --mount=type=cache,target=/root/.cache/uv \
-    bash tools/uv.sh sync --all-packages --frozen --no-dev --no-install-local
+# This project ships no uv.lock: the development sandbox cannot run package
+# managers, so the lock is resolved inside the image build, then synced frozen.
+# Copy everything first (workspace members and sources), then lock+sync in one
+# layer; per-member pyproject.toml pre-copy has no layer to cache without a lock.
 COPY . .
 RUN --mount=type=secret,id=registry_token --mount=type=cache,target=/root/.cache/uv \
+    bash tools/uv.sh lock && \
     bash tools/uv.sh sync --all-packages --frozen --no-dev
 
 FROM python:3.14-slim AS runtime
