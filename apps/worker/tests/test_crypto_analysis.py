@@ -499,6 +499,73 @@ class TestPromptAndReport(unittest.TestCase):
         self.assertIn("niet beschikbaar", report)
         self.assertIn("Geen van de top-munten staat in de koppen.", report)
 
+    def test_prompt_spot_mode_adds_rules(self) -> None:
+        prompt = crypto_analysis.build_analysis_prompt(
+            self.ROWS, "balanced", 3, "nl", trading_mode="spot"
+        )
+        self.assertIn("HANDELSMODUS: SPOT-ONLY", prompt)
+        self.assertIn("ALLEEN direction 'long' of 'none'", prompt)
+        self.assertIn("KOOPZONE", prompt)
+        self.assertIn("INVALIDATIENIVEAU", prompt)
+        self.assertIn("VERKOOPDOELEN", prompt)
+        self.assertIn("niet uitvoerbaar", prompt)
+
+    def test_prompt_default_mode_has_no_spot_rules(self) -> None:
+        prompt = crypto_analysis.build_analysis_prompt(self.ROWS, "balanced", 3, "nl")
+        self.assertNotIn("HANDELSMODUS", prompt)
+        self.assertNotIn("SPOT-ONLY", prompt)
+
+    def test_report_spot_mode_labels(self) -> None:
+        report = crypto_analysis.render_report(
+            "2026-11-14T11:30:00Z",
+            "usd",
+            "balanced",
+            self.ROWS,
+            self.PROPOSAL,
+            "mistral-medium-latest",
+            trading_mode="spot",
+        )
+        self.assertIn("Handelsmodus: spot (alleen koop, geen hefboom)", report)
+        self.assertIn("Handelsmodus spot: alleen koopideeën", report)
+        self.assertIn("**Koopzone:**", report)
+        self.assertIn("**Invalidatie (verkoop onder):**", report)
+        self.assertIn("**Verkoopdoelen:**", report)
+        # default labels must not appear in spot mode
+        self.assertNotIn("**Entry-zone:**", report)
+        self.assertNotIn("**Stop-loss:**", report)
+        self.assertNotIn("**Take-profit:**", report)
+
+    def test_report_spot_mode_marks_short_not_executable(self) -> None:
+        proposal = dict(self.PROPOSAL)
+        proposal["trade_ideas"] = [
+            {
+                "symbol": "BTC",
+                "direction": "short",
+                "conviction_pct": 60,
+                "entry_low": 68000.0,
+                "entry_high": 69000.0,
+                "stop_loss": 71000.0,
+                "take_profit_1": 64000.0,
+                "take_profit_2": None,
+                "timeframe": "24-72 uur",
+                "rationale": "Bearish trend onder SMA20/50.",
+            }
+        ]
+        report = crypto_analysis.render_report(
+            "t", "usd", "balanced", self.ROWS, proposal, "m", trading_mode="spot"
+        )
+        self.assertIn("op de spotmarkt niet uitvoerbaar", report)
+        self.assertNotIn("**Koopzone:**", report)  # short renders no buy levels
+
+    def test_report_default_mode_labels_unchanged(self) -> None:
+        report = crypto_analysis.render_report(
+            "t", "usd", "balanced", self.ROWS, self.PROPOSAL, "m", trading_mode="any"
+        )
+        self.assertIn("**Entry-zone:**", report)
+        self.assertIn("**Stop-loss:**", report)
+        self.assertIn("**Take-profit:**", report)
+        self.assertNotIn("Handelsmodus", report)
+
     def test_report_handles_no_ideas(self) -> None:
         proposal = dict(self.PROPOSAL, trade_ideas=[])
         report = crypto_analysis.render_report(
